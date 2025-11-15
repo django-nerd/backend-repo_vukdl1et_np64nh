@@ -12,7 +12,7 @@ import json
 from urllib.parse import urlencode
 from urllib.request import urlopen, Request
 
-app = FastAPI(title="Safety Navigation Backend", version="0.2.0")
+app = FastAPI(title="Safety Navigation Backend", version="0.2.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -286,6 +286,21 @@ def signals_from_osrm_step(step: Dict[str, Any]) -> SegmentSignals:
     )
 
 
+def _compute_eta_minutes(duration_s: float, mode: str, time_of_day: str) -> float:
+    # Start with OSRM duration (already traffic-agnostic). Apply small, explainable modifiers.
+    eta_min = max(1.0, duration_s / 60.0)  # at least 1 minute buffer
+    if mode == "fastest":
+        eta_min *= 0.98
+    elif mode in ("safest", "night_safe", "female_friendly"):
+        eta_min *= 1.05
+    # Time-of-day adjustment
+    if time_of_day == "night":
+        eta_min *= 1.08
+    elif time_of_day == "dawn_dusk":
+        eta_min *= 1.03
+    return round(eta_min, 1)
+
+
 def plan_routes_with_safety(start: Location, end: Location, mode: str, time_of_day: str) -> RoutePlanResponse:
     data = osrm_fetch_routes(start, end)
     routes = data.get("routes", [])
@@ -314,7 +329,7 @@ def plan_routes_with_safety(start: Location, end: Location, mode: str, time_of_d
                 seg_id += 1
 
         avg_score = round(sum(s.safety_score for s in segment_scores) / max(1, len(segment_scores)), 2)
-        eta_minutes = round(duration_s/60.0 * (1.1 if mode in ("safest", "night_safe", "female_friendly") else (0.95 if mode=="fastest" else 1.0)), 1)
+        eta_minutes = _compute_eta_minutes(duration_s, mode, time_of_day)
 
         alternatives.append(AlternativeRoute(
             geometry=RouteGeometry(coordinates=coords_latlon),
