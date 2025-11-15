@@ -12,7 +12,7 @@ import json
 from urllib.parse import urlencode
 from urllib.request import urlopen, Request
 
-app = FastAPI(title="Safety Navigation Backend", version="0.2.1")
+app = FastAPI(title="Safety Navigation Backend", version="0.2.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -186,22 +186,27 @@ def score_segment(signals: SegmentSignals, time_of_day: str, mode: str) -> Tuple
 
     # Mode adjustments
     if mode == "night_safe":
-        weights["streetlight_intensity"] += 0.08
-        weights["crime_index"] += 0.05
+        weights["streetlight_intensity"] += 0.12  # stronger emphasis at night safe
+        weights["crime_index"] += 0.06
+        weights["crowd_density"] += 0.03
     if mode == "female_friendly":
-        weights["police_proximity"] += 0.05
-        weights["cctv_density"] += 0.04
+        weights["police_proximity"] += 0.06
+        weights["cctv_density"] += 0.06
+        weights["community_reports_safety"] += 0.03
     if mode == "fastest":
         # slightly reduce safety impact for speed preference
         for k in weights:
-            weights[k] *= 0.95
+            weights[k] *= 0.93
 
     # Time-of-day modifiers
     time_mod = 1.0
     if time_of_day == "night":
-        time_mod = 0.9
+        time_mod = 0.88
+        weights["streetlight_intensity"] += 0.06
+        weights["crime_index"] += 0.03
     elif time_of_day == "dawn_dusk":
         time_mod = 0.95
+        weights["streetlight_intensity"] += 0.02
 
     # Normalize inputs and compute score
     safe_components = {
@@ -215,10 +220,9 @@ def score_segment(signals: SegmentSignals, time_of_day: str, mode: str) -> Tuple
     }
 
     # Night penalty for low light
+    low_light_penalty = 0.0
     if time_of_day == "night":
-        low_light_penalty = (1 - safe_components["streetlight_intensity"]) * 0.1
-    else:
-        low_light_penalty = 0.0
+        low_light_penalty = (1 - safe_components["streetlight_intensity"]) * 0.12
 
     weighted = sum(safe_components[k] * weights[k] for k in weights)
     base_score = max(0.0, min(1.0, (weighted - low_light_penalty)))
@@ -248,7 +252,6 @@ def osrm_fetch_routes(start: Location, end: Location) -> Dict[str, Any]:
 def signals_from_osrm_step(step: Dict[str, Any]) -> SegmentSignals:
     # Heuristic mapping based on step properties (demo purposes)
     name = (step.get("name") or "").lower()
-    mode = step.get("mode") or "driving"
     distance = float(step.get("distance") or 0.0)
 
     # Base assumptions
@@ -261,15 +264,15 @@ def signals_from_osrm_step(step: Dict[str, Any]) -> SegmentSignals:
 
     # Adjustments by road context
     if any(k in name for k in ["highway", "express", "motorway"]):
-        crowd -= 0.1
-        cctv -= 0.05
-        streetlight -= 0.05
+        crowd -= 0.12
+        cctv -= 0.06
+        streetlight -= 0.06
     if any(k in name for k in ["main", "market", "station", "plaza", "cp "]):
         crowd += 0.15
         cctv += 0.1
     if any(k in name for k in ["park", "trail", "footpath", "lane"]):
-        streetlight -= 0.1
-        crime += 0.05
+        streetlight -= 0.12
+        crime += 0.06
     if distance > 800:
         police -= 0.05
         community -= 0.05
@@ -290,12 +293,12 @@ def _compute_eta_minutes(duration_s: float, mode: str, time_of_day: str) -> floa
     # Start with OSRM duration (already traffic-agnostic). Apply small, explainable modifiers.
     eta_min = max(1.0, duration_s / 60.0)  # at least 1 minute buffer
     if mode == "fastest":
-        eta_min *= 0.98
+        eta_min *= 0.97
     elif mode in ("safest", "night_safe", "female_friendly"):
-        eta_min *= 1.05
+        eta_min *= 1.06
     # Time-of-day adjustment
     if time_of_day == "night":
-        eta_min *= 1.08
+        eta_min *= 1.09
     elif time_of_day == "dawn_dusk":
         eta_min *= 1.03
     return round(eta_min, 1)
@@ -320,10 +323,8 @@ def plan_routes_with_safety(start: Location, end: Location, mode: str, time_of_d
             for step in leg.get("steps", []):
                 step_dist = float(step.get("distance", 0.0))
                 s_sig = signals_from_osrm_step(step)
-                # Use step speed from duration
                 step_dur = float(step.get("duration", 1.0))
                 avg_speed_kmh = max(5.0, (step_dist/1000.0) / max(0.000277, step_dur/3600.0))
-                # Score
                 score, _ = score_segment(s_sig, time_of_day, mode)
                 segment_scores.append(SegmentScore(segment_id=str(seg_id), safety_score=score))
                 seg_id += 1
@@ -340,18 +341,37 @@ def plan_routes_with_safety(start: Location, end: Location, mode: str, time_of_d
             average_safety_score=avg_score,
         ))
 
-    # Choose route by mode
+    # If OSRM returns identical geometries, dedupe to ensure variety
+    def geom_sig(ar: AlternativeRoute) -> str:
+        coords = ar.geometry.coordinates
+        if not coords:
+            return ""
+        head = coords[0]
+        tail = coords[-1]
+        return f"{round(head[0],4)}_{round(head[1],4)}_{round(tail[0],4)}_{round(tail[1],4)}_{round(ar.distance_m)}"
+
+    uniq = {}
+    for a in alternatives:
+        uniq.setdefault(geom_sig(a), a)
+    alternatives = list(uniq.values())
+
+    # Choose route by mode with stronger differentiation
     chosen: AlternativeRoute
     if mode == "fastest":
-        chosen = min(alternatives, key=lambda a: a.duration_s)
-    elif mode in ("safest", "night_safe", "female_friendly"):
-        chosen = max(alternatives, key=lambda a: a.average_safety_score)
+        chosen = min(alternatives, key=lambda a: (a.duration_s, -a.average_safety_score))
+    elif mode == "safest":
+        chosen = max(alternatives, key=lambda a: (a.average_safety_score, -a.duration_s))
+    elif mode == "night_safe":
+        # Prefer higher safety, but penalize longer durations slightly
+        chosen = max(alternatives, key=lambda a: (a.average_safety_score*1.05 - (a.duration_s/600)))
+    elif mode == "female_friendly":
+        # Similar to safest but add a mild bias for medium distances (avoid highways)
+        chosen = max(alternatives, key=lambda a: (a.average_safety_score*1.04 - (a.distance_m/100000)))
     else:  # balanced
-        # rank by combined normalized metrics
         by_time = min(a.duration_s for a in alternatives) or 1.0
         by_safety = max(a.average_safety_score for a in alternatives) or 1.0
         def rank(a: AlternativeRoute):
-            return (a.duration_s/by_time)*0.5 + (by_safety/max(1.0, a.average_safety_score))*0.5
+            return (a.duration_s/by_time)*0.55 + (by_safety/max(1.0, a.average_safety_score))*0.45
         chosen = min(alternatives, key=rank)
 
     return RoutePlanResponse(chosen=chosen, alternatives=alternatives, mode=mode)
@@ -589,20 +609,42 @@ def sos_auto_check(check: AutoSOSCheck):
 @app.get("/api/alerts")
 def get_alerts(lat: float, lon: float, time_of_day: Literal["day", "night", "dawn_dusk"] = "day"):
     # Heuristic alerts demo; in production, derive from live feeds and reports
-    nearby_reports = list(db["report"].find({}).sort("created_at", -1).limit(50))
+    nearby_reports = list(db["report"].find({}).sort("created_at", -1).limit(100))
     alerts: List[Dict[str, Any]] = []
+    seen = set()
     for r in nearby_reports:
+        if not r.get("location"):
+            continue
         d = haversine_m(lat, lon, r["location"]["lat"], r["location"]["lon"]) if r.get("location") else 1e9
-        if d < 600:
+        if d < 800:
+            cat = r.get("category", "incident")
+            sev = 2
+            if cat in ("harassment", "hazard"):
+                sev = 3
+            if cat == "dark_spot":
+                sev = 2 if time_of_day != "night" else 4
+            key = f"{cat}:{int(d/50)}"
+            if key in seen:
+                continue
+            seen.add(key)
             alerts.append({
-                "type": r.get("category", "incident"),
-                "message": f"Recent {r.get('category')} reported nearby ({int(d)}m)",
+                "type": cat,
+                "message": f"{cat.replace('_',' ').title()} nearby (~{int(d)}m)",
                 "distance_m": int(d),
-                "time": r.get("created_at")
+                "severity": sev,  # 1-5
+                "recommendation": "Use well-lit streets" if cat in ("dark_spot",) else (
+                    "Avoid reported area" if sev >= 3 else "Stay alert"
+                )
             })
+    # Time-of-day contextual alerts
     if time_of_day == "night":
-        alerts.append({"type": "dark_zone", "message": "Low-light area ahead. Prefer well-lit streets."})
-    return {"alerts": alerts[:5]}
+        alerts.append({"type": "low_light", "message": "Low-light area ahead. Prefer well-lit streets.", "severity": 3, "recommendation": "Switch to Night-safe mode"})
+    elif time_of_day == "dawn_dusk":
+        alerts.append({"type": "visibility", "message": "Reduced visibility around dawn/dusk.", "severity": 2, "recommendation": "Keep to main roads"})
+
+    # Sort by severity then distance
+    alerts.sort(key=lambda a: (-a.get("severity", 1), a.get("distance_m", 1e9)))
+    return {"alerts": alerts[:8]}
 
 
 # Community reports
@@ -632,7 +674,7 @@ def add_reward(rw: RewardsUpdate):
     return {"reward_id": str(rid)}
 
 
-# Trip history (basic)
+# Trip history (enhanced)
 class TripLog(BaseModel):
     user_uid: str
     origin: Location
@@ -652,10 +694,34 @@ def log_trip(t: TripLog):
 
 @app.get("/api/trips")
 def get_trips(user_uid: str):
-    trips = list(db["trip"].find({"user_uid": user_uid}).sort("created_at", -1).limit(20))
+    trips = list(db["trip"].find({"user_uid": user_uid}).sort("created_at", -1).limit(50))
     for t in trips:
         t["_id"] = str(t["_id"])  # serialize
     return {"trips": trips}
+
+
+@app.get("/api/trips/summary")
+def get_trip_summary(user_uid: str):
+    trips = list(db["trip"].find({"user_uid": user_uid}))
+    total = len(trips)
+    total_km = round(sum(t.get("distance_km", 0.0) for t in trips), 2)
+    avg_safety = round(sum(t.get("safety_score", 0.0) for t in trips) / total, 2) if total else 0.0
+    from collections import Counter
+    mode_counts = Counter([t.get("mode", "balanced") for t in trips])
+    favorite_mode = mode_counts.most_common(1)[0][0] if total else None
+    return {"total_trips": total, "total_km": total_km, "avg_safety": avg_safety, "favorite_mode": favorite_mode}
+
+
+@app.delete("/api/trips/{trip_id}")
+def delete_trip(trip_id: str, user_uid: Optional[str] = None):
+    from bson import ObjectId
+    q = {"_id": ObjectId(trip_id)}
+    if user_uid:
+        q["user_uid"] = user_uid
+    res = db["trip"].delete_one(q)
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Trip not found")
+    return {"status": "deleted", "trip_id": trip_id}
 
 
 if __name__ == "__main__":

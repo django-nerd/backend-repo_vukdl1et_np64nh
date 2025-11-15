@@ -1,21 +1,23 @@
 INFO:     Will watch for changes in these directories: ['/home/workspace']
 INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
-INFO:     Started reloader process [522] using StatReload
-INFO:     Started server process [524]
+INFO:     Started reloader process [573] using StatReload
+INFO:     Started server process [575]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
-INFO:     172.20.0.1:54424 - "HEAD / HTTP/1.1" 405 Method Not Allowed
-INFO:     172.20.0.1:58786 - "GET /api/trips?user_uid=user_a HTTP/1.1" 200 OK
-INFO:     172.20.0.1:58800 - "GET /api/alerts?lat=28.61&lon=77.21&time_of_day=night HTTP/1.1" 200 OK
-INFO:     172.20.0.1:58786 - "GET /api/trips?user_uid=user_a HTTP/1.1" 200 OK
-INFO:     172.20.0.1:58800 - "GET /api/alerts?lat=28.61&lon=77.21&time_of_day=night HTTP/1.1" 200 OK
-INFO:     172.20.0.1:58822 - "GET /api/alerts?lat=28.61&lon=77.21&time_of_day=night HTTP/1.1" 200 OK
-INFO:     172.20.0.1:58814 - "GET /api/trips?user_uid=user_a HTTP/1.1" 200 OK
-INFO:     172.20.0.1:58814 - "GET /api/trips?user_uid=user_a HTTP/1.1" 200 OK
-INFO:     172.20.0.1:58822 - "GET /api/alerts?lat=28.61&lon=77.21&time_of_day=night HTTP/1.1" 200 OK
-INFO:     172.20.0.1:58814 - "GET /api/trips?user_uid=user_a HTTP/1.1" 200 OK
-INFO:     172.20.0.1:58814 - "GET /api/trips?user_uid=user_a HTTP/1.1" 200 OK
-INFO:     172.20.0.1:55164 - "POST /api/routes/plan HTTP/1.1" 200 OK
-INFO:     172.20.0.1:55164 - "POST /api/routes/plan HTTP/1.1" 200 OK
-INFO:     172.20.0.1:57598 - "POST /api/routes/plan HTTP/1.1" 200 OK
-INFO:     172.20.0.1:57598 - "POST /api/routes/plan HTTP/1.1" 200 OK
+INFO:     172.20.0.1:56812 - "HEAD / HTTP/1.1" 405 Method Not Allowed
+INFO:     172.20.0.1:56820 - "GET /api/trips?user_uid=user_a HTTP/1.1" 200 OK
+INFO:     172.20.0.1:56830 - "GET /api/alerts?lat=28.61&lon=77.21&time_of_day=night HTTP/1.1" 200 OK
+INFO:     172.20.0.1:56820 - "GET /api/trips?user_uid=user_a HTTP/1.1" 200 OK
+INFO:     172.20.0.1:56830 - "GET /api/alerts?lat=28.61&lon=77.21&time_of_day=night HTTP/1.1" 200 OK
+INFO:     172.20.0.1:56820 - "GET /api/trips/summary?user_uid=user_a HTTP/1.1" 200 OK
+INFO:     172.20.0.1:56830 - "GET /api/trips?user_uid=user_a HTTP/1.1" 200 OK
+INFO:     172.20.0.1:56830 - "GET /api/trips?user_uid=user_a HTTP/1.1" 200 OK
+INFO:     172.20.0.1:56820 - "GET /api/trips/summary?user_uid=user_a HTTP/1.1" 200 OK
+INFO:     172.20.0.1:36388 - "GET /api/trips?user_uid=user_a HTTP/1.1" 200 OK
+INFO:     172.20.0.1:36402 - "GET /api/alerts?lat=28.61&lon=77.21&time_of_day=night HTTP/1.1" 200 OK
+INFO:     172.20.0.1:36388 - "GET /api/trips?user_uid=user_a HTTP/1.1" 200 OK
+INFO:     172.20.0.1:36402 - "GET /api/trips/summary?user_uid=user_a HTTP/1.1" 200 OK
+INFO:     172.20.0.1:36388 - "GET /api/alerts?lat=28.61&lon=77.21&time_of_day=night HTTP/1.1" 200 OK
+INFO:     172.20.0.1:36402 - "GET /api/trips?user_uid=user_a HTTP/1.1" 200 OK
+INFO:     172.20.0.1:36402 - "GET /api/trips?user_uid=user_a HTTP/1.1" 200 OK
+INFO:     172.20.0.1:36388 - "GET /api/trips/summary?user_uid=user_a HTTP/1.1" 200 OK
