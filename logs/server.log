@@ -1,15 +1,15 @@
 INFO:     Will watch for changes in these directories: ['/home/workspace']
 INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
-INFO:     Started reloader process [315] using StatReload
-INFO:     Started server process [317]
+INFO:     Started reloader process [396] using StatReload
+INFO:     Started server process [398]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
-INFO:     172.20.0.1:47792 - "HEAD / HTTP/1.1" 405 Method Not Allowed
-INFO:     172.20.0.1:42876 - "GET /api/alerts?lat=28.61&lon=77.21&time_of_day=night HTTP/1.1" 200 OK
-INFO:     172.20.0.1:42876 - "GET /api/alerts?lat=28.61&lon=77.21&time_of_day=night HTTP/1.1" 200 OK
-INFO:     172.20.0.1:42876 - "GET /api/trips?user_uid=user_a HTTP/1.1" 200 OK
-INFO:     172.20.0.1:42876 - "GET /api/trips?user_uid=user_a HTTP/1.1" 200 OK
-INFO:     172.20.0.1:55552 - "GET /api/alerts?lat=28.61&lon=77.21&time_of_day=night HTTP/1.1" 200 OK
-INFO:     172.20.0.1:55552 - "GET /api/alerts?lat=28.61&lon=77.21&time_of_day=night HTTP/1.1" 200 OK
-INFO:     172.20.0.1:55552 - "GET /api/trips?user_uid=user_a HTTP/1.1" 200 OK
-INFO:     172.20.0.1:55552 - "GET /api/trips?user_uid=user_a HTTP/1.1" 200 OK
+INFO:     172.20.0.1:58710 - "HEAD / HTTP/1.1" 405 Method Not Allowed
+INFO:     172.20.0.1:58716 - "GET /api/alerts?lat=28.61&lon=77.21&time_of_day=night HTTP/1.1" 200 OK
+INFO:     172.20.0.1:58716 - "GET /api/alerts?lat=28.61&lon=77.21&time_of_day=night HTTP/1.1" 200 OK
+INFO:     172.20.0.1:58716 - "GET /api/trips?user_uid=user_a HTTP/1.1" 200 OK
+INFO:     172.20.0.1:58716 - "GET /api/trips?user_uid=user_a HTTP/1.1" 200 OK
+INFO:     172.20.0.1:48450 - "GET /api/alerts?lat=28.61&lon=77.21&time_of_day=night HTTP/1.1" 200 OK
+INFO:     172.20.0.1:48450 - "GET /api/alerts?lat=28.61&lon=77.21&time_of_day=night HTTP/1.1" 200 OK
+INFO:     172.20.0.1:48450 - "GET /api/trips?user_uid=user_a HTTP/1.1" 200 OK
+INFO:     172.20.0.1:48450 - "GET /api/trips?user_uid=user_a HTTP/1.1" 200 OK

@@ -1,6 +1,6 @@
 import os
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional, Literal, Dict, Any
+from typing import List, Optional, Literal, Dict, Any, Tuple
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,7 +8,11 @@ from pydantic import BaseModel, Field
 
 from database import db, create_document, get_documents
 
-app = FastAPI(title="Safety Navigation Backend", version="0.1.0")
+import json
+from urllib.parse import urlencode
+from urllib.request import urlopen, Request
+
+app = FastAPI(title="Safety Navigation Backend", version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -132,6 +136,29 @@ class RewardsUpdate(BaseModel):
     points: int
     reason: str
 
+# Routing models
+class RoutePlanRequest(BaseModel):
+    start: Location
+    end: Location
+    mode: Literal["safest", "fastest", "balanced", "night_safe", "female_friendly"] = "balanced"
+    time_of_day: Literal["day", "night", "dawn_dusk"] = "day"
+
+class RouteGeometry(BaseModel):
+    coordinates: List[List[float]]  # [lat, lon] pairs
+
+class AlternativeRoute(BaseModel):
+    geometry: RouteGeometry
+    distance_m: float
+    duration_s: float
+    eta_minutes: float
+    segment_scores: List[SegmentScore]
+    average_safety_score: float
+
+class RoutePlanResponse(BaseModel):
+    chosen: AlternativeRoute
+    alternatives: List[AlternativeRoute]
+    mode: str
+
 # -----------------------------
 # Utilities
 # -----------------------------
@@ -146,7 +173,7 @@ def haversine_m(lat1, lon1, lat2, lon2) -> float:
     return R * c
 
 
-def score_segment(signals: SegmentSignals, time_of_day: str, mode: str) -> (float, Dict[str, float]):
+def score_segment(signals: SegmentSignals, time_of_day: str, mode: str) -> Tuple[float, Dict[str, float]]:
     # Base weights for signals (sum to ~1)
     weights = {
         "streetlight_intensity": 0.18,
@@ -197,6 +224,122 @@ def score_segment(signals: SegmentSignals, time_of_day: str, mode: str) -> (floa
     base_score = max(0.0, min(1.0, (weighted - low_light_penalty)))
     score_0_100 = round(base_score * 100 * time_mod, 2)
     return score_0_100, {**safe_components, "low_light_penalty": round(low_light_penalty, 3)}
+
+
+def osrm_fetch_routes(start: Location, end: Location) -> Dict[str, Any]:
+    # Use OSRM public demo server (note: rate limited, for demo)
+    base = "https://router.project-osrm.org/route/v1/driving/"
+    coords = f"{start.lon},{start.lat};{end.lon},{end.lat}"
+    params = {
+        "alternatives": "true",
+        "geometries": "geojson",
+        "overview": "full",
+        "steps": "true",
+    }
+    url = base + coords + "?" + urlencode(params)
+    req = Request(url, headers={"User-Agent": "SafeRoutes/0.2"})
+    with urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    if data.get("code") != "Ok" or not data.get("routes"):
+        raise HTTPException(status_code=502, detail="Routing service unavailable")
+    return data
+
+
+def signals_from_osrm_step(step: Dict[str, Any]) -> SegmentSignals:
+    # Heuristic mapping based on step properties (demo purposes)
+    name = (step.get("name") or "").lower()
+    mode = step.get("mode") or "driving"
+    distance = float(step.get("distance") or 0.0)
+
+    # Base assumptions
+    streetlight = 0.6
+    cctv = 0.5
+    police = 0.5
+    crowd = 0.5
+    crime = 0.3
+    community = 0.6
+
+    # Adjustments by road context
+    if any(k in name for k in ["highway", "express", "motorway"]):
+        crowd -= 0.1
+        cctv -= 0.05
+        streetlight -= 0.05
+    if any(k in name for k in ["main", "market", "station", "plaza", "cp "]):
+        crowd += 0.15
+        cctv += 0.1
+    if any(k in name for k in ["park", "trail", "footpath", "lane"]):
+        streetlight -= 0.1
+        crime += 0.05
+    if distance > 800:
+        police -= 0.05
+        community -= 0.05
+
+    # Clamp 0..1
+    clamp = lambda x: max(0.0, min(1.0, x))
+    return SegmentSignals(
+        streetlight_intensity=clamp(streetlight),
+        cctv_density=clamp(cctv),
+        police_proximity=clamp(police),
+        crowd_density=clamp(crowd),
+        crime_index=clamp(crime),
+        community_reports_safety=clamp(community),
+    )
+
+
+def plan_routes_with_safety(start: Location, end: Location, mode: str, time_of_day: str) -> RoutePlanResponse:
+    data = osrm_fetch_routes(start, end)
+    routes = data.get("routes", [])
+    alternatives: List[AlternativeRoute] = []
+
+    for idx, r in enumerate(routes):
+        geometry = r.get("geometry", {})
+        coords_lonlat: List[List[float]] = geometry.get("coordinates", [])  # [lon, lat]
+        coords_latlon = [[latlon[1], latlon[0]] for latlon in coords_lonlat]
+        distance_m = float(r.get("distance", 0.0))
+        duration_s = float(r.get("duration", 0.0))
+
+        # Build segments from steps across legs
+        segment_scores: List[SegmentScore] = []
+        seg_id = 1
+        for leg in r.get("legs", []):
+            for step in leg.get("steps", []):
+                step_dist = float(step.get("distance", 0.0))
+                s_sig = signals_from_osrm_step(step)
+                # Use step speed from duration
+                step_dur = float(step.get("duration", 1.0))
+                avg_speed_kmh = max(5.0, (step_dist/1000.0) / max(0.000277, step_dur/3600.0))
+                # Score
+                score, _ = score_segment(s_sig, time_of_day, mode)
+                segment_scores.append(SegmentScore(segment_id=str(seg_id), safety_score=score))
+                seg_id += 1
+
+        avg_score = round(sum(s.safety_score for s in segment_scores) / max(1, len(segment_scores)), 2)
+        eta_minutes = round(duration_s/60.0 * (1.1 if mode in ("safest", "night_safe", "female_friendly") else (0.95 if mode=="fastest" else 1.0)), 1)
+
+        alternatives.append(AlternativeRoute(
+            geometry=RouteGeometry(coordinates=coords_latlon),
+            distance_m=round(distance_m, 2),
+            duration_s=round(duration_s, 1),
+            eta_minutes=eta_minutes,
+            segment_scores=segment_scores,
+            average_safety_score=avg_score,
+        ))
+
+    # Choose route by mode
+    chosen: AlternativeRoute
+    if mode == "fastest":
+        chosen = min(alternatives, key=lambda a: a.duration_s)
+    elif mode in ("safest", "night_safe", "female_friendly"):
+        chosen = max(alternatives, key=lambda a: a.average_safety_score)
+    else:  # balanced
+        # rank by combined normalized metrics
+        by_time = min(a.duration_s for a in alternatives) or 1.0
+        by_safety = max(a.average_safety_score for a in alternatives) or 1.0
+        def rank(a: AlternativeRoute):
+            return (a.duration_s/by_time)*0.5 + (by_safety/max(1.0, a.average_safety_score))*0.5
+        chosen = min(alternatives, key=rank)
+
+    return RoutePlanResponse(chosen=chosen, alternatives=alternatives, mode=mode)
 
 
 # -----------------------------
@@ -280,6 +423,11 @@ def api_score_route(payload: ScoreRouteRequest):
         segment_scores=seg_scores,
         mode=payload.mode,
     )
+
+
+@app.post("/api/routes/plan", response_model=RoutePlanResponse)
+def api_plan_route(req: RoutePlanRequest):
+    return plan_routes_with_safety(req.start, req.end, req.mode, req.time_of_day)
 
 
 # Companion matching
