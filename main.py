@@ -143,7 +143,7 @@ class RoutePlanRequest(BaseModel):
     mode: Literal["safest", "fastest", "balanced", "night_safe", "female_friendly"] = "balanced"
     time_of_day: Literal["day", "night", "dawn_dusk"] = "day"
     max_alternatives: int = 5  # soft limit after dedupe/diversity selection
-    diversity_threshold_m: float = 150.0  # minimum avg separation between selected routes
+    diversity_threshold_m: float = 0.0  # 0 or negative = auto-tune by start/end
 
 class RouteGeometry(BaseModel):
     coordinates: List[List[float]]  # [lat, lon] pairs
@@ -160,6 +160,11 @@ class RoutePlanResponse(BaseModel):
     chosen: AlternativeRoute
     alternatives: List[AlternativeRoute]
     mode: str
+    # validation + tuning diagnostics
+    threshold_used_m: float
+    candidate_count: int
+    selected_count: int
+    separations_m: List[float]
 
 # -----------------------------
 # Utilities
@@ -323,7 +328,15 @@ def _avg_route_separation_m(a_coords: List[List[float]], b_coords: List[List[flo
     return total / m
 
 
-def plan_routes_with_safety(start: Location, end: Location, mode: str, time_of_day: str, max_alternatives: int = 5, diversity_threshold_m: float = 150.0) -> RoutePlanResponse:
+def _auto_threshold_by_geometry(start: Location, end: Location) -> float:
+    # Base on straight-line distance: farther trips deserve larger separation.
+    beeline = haversine_m(start.lat, start.lon, end.lat, end.lon)
+    # 2% of beeline, clamped between 120m and 450m
+    thr = max(120.0, min(450.0, 0.02 * beeline))
+    return thr
+
+
+def plan_routes_with_safety(start: Location, end: Location, mode: str, time_of_day: str, max_alternatives: int = 5, diversity_threshold_m: float = 0.0) -> RoutePlanResponse:
     data = osrm_fetch_routes(start, end)
     routes = data.get("routes", [])
     alternatives: List[AlternativeRoute] = []
@@ -388,20 +401,41 @@ def plan_routes_with_safety(start: Location, end: Location, mode: str, time_of_d
 
     candidates = sorted(alternatives, key=objective)
 
-    # Diversity selection: greedily pick routes far enough from already selected
+    # Auto-tune threshold if not provided (<=0 means auto)
+    auto_thr = _auto_threshold_by_geometry(start, end)
+    thr = diversity_threshold_m if diversity_threshold_m and diversity_threshold_m > 0 else auto_thr
+
+    # Helper selection with a given threshold
+    def select_with_threshold(threshold: float) -> List[AlternativeRoute]:
+        picked: List[AlternativeRoute] = []
+        for cand in candidates:
+            if not picked:
+                picked.append(cand)
+                continue
+            min_sep = min(
+                _avg_route_separation_m(cand.geometry.coordinates, s.geometry.coordinates)
+                for s in picked
+            )
+            if min_sep >= threshold:
+                picked.append(cand)
+            if len(picked) >= max(1, max_alternatives):
+                break
+        return picked
+
+    # Try decreasing thresholds until we get at least 2-3 reasonably distinct options (when available)
+    thresholds_to_try = [thr, thr*0.85, thr*0.7, max(60.0, thr*0.55)]
     selected: List[AlternativeRoute] = []
-    for cand in candidates:
-        if not selected:
-            selected.append(cand)
-            continue
-        min_sep = min(
-            _avg_route_separation_m(cand.geometry.coordinates, s.geometry.coordinates)
-            for s in selected
-        )
-        if min_sep >= diversity_threshold_m:
-            selected.append(cand)
-        if len(selected) >= max(1, max_alternatives):
+    used_thr = thr
+    desired = min(max_alternatives, max(2, len(candidates)))
+    for tthr in thresholds_to_try:
+        picked = select_with_threshold(tthr)
+        if len(picked) >= min(3, desired) or (len(candidates) <= 2 and len(picked) >= 2) or len(picked) >= desired:
+            selected = picked
+            used_thr = tthr
             break
+        # keep trying smaller threshold
+        selected = picked
+        used_thr = tthr
 
     # If not enough diverse routes found, top-up with remaining best candidates
     if len(selected) < min(max_alternatives, len(candidates)):
@@ -414,6 +448,9 @@ def plan_routes_with_safety(start: Location, end: Location, mode: str, time_of_d
 
     # Choose route by mode with stronger differentiation
     chosen: AlternativeRoute
+    if not selected:
+        raise HTTPException(status_code=502, detail="No routes returned by routing service")
+
     if mode == "fastest":
         chosen = min(selected, key=lambda a: (a.duration_s, -a.average_safety_score))
     elif mode == "safest":
@@ -429,7 +466,24 @@ def plan_routes_with_safety(start: Location, end: Location, mode: str, time_of_d
             return (a.duration_s/by_time)*0.5 + (by_safety/max(1.0, a.average_safety_score))*0.5
         chosen = min(selected, key=rank)
 
-    return RoutePlanResponse(chosen=chosen, alternatives=selected, mode=mode)
+    # Validation metrics: per-route min separation to others
+    seps: List[float] = []
+    for i, a in enumerate(selected):
+        others = [b for j, b in enumerate(selected) if j != i]
+        if not others:
+            continue
+        min_sep = min(_avg_route_separation_m(a.geometry.coordinates, b.geometry.coordinates) for b in others)
+        seps.append(round(min_sep, 1))
+
+    return RoutePlanResponse(
+        chosen=chosen,
+        alternatives=selected,
+        mode=mode,
+        threshold_used_m=round(used_thr, 1),
+        candidate_count=len(candidates),
+        selected_count=len(selected),
+        separations_m=seps,
+    )
 
 
 # -----------------------------
