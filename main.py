@@ -142,6 +142,8 @@ class RoutePlanRequest(BaseModel):
     end: Location
     mode: Literal["safest", "fastest", "balanced", "night_safe", "female_friendly"] = "balanced"
     time_of_day: Literal["day", "night", "dawn_dusk"] = "day"
+    max_alternatives: int = 5  # soft limit after dedupe/diversity selection
+    diversity_threshold_m: float = 150.0  # minimum avg separation between selected routes
 
 class RouteGeometry(BaseModel):
     coordinates: List[List[float]]  # [lat, lon] pairs
@@ -234,10 +236,11 @@ def osrm_fetch_routes(start: Location, end: Location) -> Dict[str, Any]:
     base = "https://router.project-osrm.org/route/v1/driving/"
     coords = f"{start.lon},{start.lat};{end.lon},{end.lat}"
     params = {
-        "alternatives": "true",
+        "alternatives": "true",  # request multiple routes
         "geometries": "geojson",
         "overview": "full",
         "steps": "true",
+        "annotations": "true",  # more precise step data
     }
     url = base + coords + "?" + urlencode(params)
     req = Request(url, headers={"User-Agent": "SafeRoutes/0.2"})
@@ -293,7 +296,34 @@ def _eta_minutes_exact(duration_s: float) -> float:
     return round(max(0.1, duration_s / 60.0), 1)
 
 
-def plan_routes_with_safety(start: Location, end: Location, mode: str, time_of_day: str) -> RoutePlanResponse:
+def _sample_coords(coords: List[List[float]], k: int = 15) -> List[List[float]]:
+    if not coords:
+        return []
+    n = len(coords)
+    if n <= k:
+        return coords
+    # pick evenly spaced samples including endpoints
+    step = max(1, n // (k - 1))
+    sample = [coords[i] for i in range(0, n, step)]
+    if sample[-1] != coords[-1]:
+        sample.append(coords[-1])
+    return sample[:k]
+
+
+def _avg_route_separation_m(a_coords: List[List[float]], b_coords: List[List[float]]) -> float:
+    # Approximate route separation by averaging distances between corresponding samples
+    a_s = _sample_coords(a_coords)
+    b_s = _sample_coords(b_coords)
+    m = min(len(a_s), len(b_s))
+    if m == 0:
+        return 0.0
+    total = 0.0
+    for i in range(m):
+        total += haversine_m(a_s[i][0], a_s[i][1], b_s[i][0], b_s[i][1])
+    return total / m
+
+
+def plan_routes_with_safety(start: Location, end: Location, mode: str, time_of_day: str, max_alternatives: int = 5, diversity_threshold_m: float = 150.0) -> RoutePlanResponse:
     data = osrm_fetch_routes(start, end)
     routes = data.get("routes", [])
     alternatives: List[AlternativeRoute] = []
@@ -330,37 +360,76 @@ def plan_routes_with_safety(start: Location, end: Location, mode: str, time_of_d
             average_safety_score=avg_score,
         ))
 
-    # If OSRM returns identical geometries, dedupe using geometry signature (sampled coordinates)
+    # First pass: dedupe by coarse signature (start/mid/end points + distance rounding)
     def geom_sig(ar: AlternativeRoute) -> str:
         coords = ar.geometry.coordinates
         if not coords:
             return ""
         sample = coords[:5] + coords[len(coords)//2:len(coords)//2+5] + coords[-5:]
-        return "|".join(f"{round(c[0],4)},{round(c[1],4)}" for c in sample) + f"|{round(ar.distance_m)}"
+        return "|".join(f"{round(c[0],4)},{round(c[1],4)}" for c in sample) + f"|{round(ar.distance_m)}|{round(ar.duration_s)}"
 
     uniq = {}
     for a in alternatives:
         uniq.setdefault(geom_sig(a), a)
     alternatives = list(uniq.values())
 
+    # Sort candidates by objective preference
+    def objective(a: AlternativeRoute) -> float:
+        if mode == "fastest":
+            return a.duration_s
+        if mode == "safest":
+            return -a.average_safety_score
+        if mode == "night_safe":
+            return -(a.average_safety_score*1.1) + (a.duration_s/600)
+        if mode == "female_friendly":
+            return -(a.average_safety_score*1.08) + (a.distance_m/120000)
+        # balanced
+        return a.duration_s - a.average_safety_score * 10
+
+    candidates = sorted(alternatives, key=objective)
+
+    # Diversity selection: greedily pick routes far enough from already selected
+    selected: List[AlternativeRoute] = []
+    for cand in candidates:
+        if not selected:
+            selected.append(cand)
+            continue
+        min_sep = min(
+            _avg_route_separation_m(cand.geometry.coordinates, s.geometry.coordinates)
+            for s in selected
+        )
+        if min_sep >= diversity_threshold_m:
+            selected.append(cand)
+        if len(selected) >= max(1, max_alternatives):
+            break
+
+    # If not enough diverse routes found, top-up with remaining best candidates
+    if len(selected) < min(max_alternatives, len(candidates)):
+        for cand in candidates:
+            if cand in selected:
+                continue
+            selected.append(cand)
+            if len(selected) >= max_alternatives:
+                break
+
     # Choose route by mode with stronger differentiation
     chosen: AlternativeRoute
     if mode == "fastest":
-        chosen = min(alternatives, key=lambda a: (a.duration_s, -a.average_safety_score))
+        chosen = min(selected, key=lambda a: (a.duration_s, -a.average_safety_score))
     elif mode == "safest":
-        chosen = max(alternatives, key=lambda a: (a.average_safety_score, -a.duration_s))
+        chosen = max(selected, key=lambda a: (a.average_safety_score, -a.duration_s))
     elif mode == "night_safe":
-        chosen = max(alternatives, key=lambda a: (a.average_safety_score*1.1 - (a.duration_s/600)))
+        chosen = max(selected, key=lambda a: (a.average_safety_score*1.1 - (a.duration_s/600)))
     elif mode == "female_friendly":
-        chosen = max(alternatives, key=lambda a: (a.average_safety_score*1.08 - (a.distance_m/120000)))
+        chosen = max(selected, key=lambda a: (a.average_safety_score*1.08 - (a.distance_m/120000)))
     else:  # balanced
-        by_time = min(a.duration_s for a in alternatives) or 1.0
-        by_safety = max(a.average_safety_score for a in alternatives) or 1.0
+        by_time = min(a.duration_s for a in selected) or 1.0
+        by_safety = max(a.average_safety_score for a in selected) or 1.0
         def rank(a: AlternativeRoute):
             return (a.duration_s/by_time)*0.5 + (by_safety/max(1.0, a.average_safety_score))*0.5
-        chosen = min(alternatives, key=rank)
+        chosen = min(selected, key=rank)
 
-    return RoutePlanResponse(chosen=chosen, alternatives=alternatives, mode=mode)
+    return RoutePlanResponse(chosen=chosen, alternatives=selected, mode=mode)
 
 
 # -----------------------------
@@ -442,7 +511,7 @@ def api_score_route(payload: ScoreRouteRequest):
 
 @app.post("/api/routes/plan", response_model=RoutePlanResponse)
 def api_plan_route(req: RoutePlanRequest):
-    return plan_routes_with_safety(req.start, req.end, req.mode, req.time_of_day)
+    return plan_routes_with_safety(req.start, req.end, req.mode, req.time_of_day, req.max_alternatives, req.diversity_threshold_m)
 
 
 # Companion matching
